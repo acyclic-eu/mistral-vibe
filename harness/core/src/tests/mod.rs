@@ -342,40 +342,89 @@ fn restore_regenerates_model_input_from_the_current_configuration() {
 }
 
 ///
-/// *Prepare*: An idle session accepts one Runtime notification.
-/// *Do*: Deliver the same notification ID again, then start a user turn.
-/// *Assert*: The duplicate changes no semantic state and the next model input contains one notification message.
+/// *Prepare*: An idle session receives one Runtime notification.
+/// *Do*: Receive the same notification ID again, then start a user turn.
+/// *Assert*: The notification opens a notification-only Turn, the duplicate changes no semantic state, and the message is model-visible once.
 ///
 #[test]
-fn idle_notification_is_injected_once_and_duplicate_is_a_noop() {
+fn idle_notification_wakes_a_turn_and_duplicate_is_a_noop() {
     // Prepare
     let mut session = HarnessSession::create(config()).expect("session creates");
-    let received =
-        accepted_value(session.apply(input(1, notification("notification-1", "build done"))));
-    let before_duplicate = checkpoint_value(&session);
+    // An agent message, not a process notification: delivery keeps its identity
+    // in the recent-id ring, so a retry is a suppressed duplicate.
+    let agent_message = json!({
+        "type": "notification",
+        "notification": {
+            "id": "notification-1",
+            "source": {"type": "agent_message", "sender_agent_path": "/root/child"},
+            "level": "info",
+            "message": "build done",
+            "content": [{"type": "text", "text": "build done"}],
+        },
+    });
+    let received = accepted_value(session.apply(input(1, agent_message.clone())));
+    let wake_action_id = dispatched_action_id(&received).to_string();
 
     // Do
-    let duplicate =
-        accepted_value(session.apply(input(2, notification("notification-1", "build done"))));
+    let answered = accepted_value(session.apply(input(
+        2,
+        completion(
+            &wake_action_id,
+            json!([{"type": "text", "text": "acknowledged"}]),
+        ),
+    )));
+    let before_duplicate = checkpoint_value(&session);
+    let duplicate = accepted_value(session.apply(input(3, agent_message.clone())));
     let after_duplicate = checkpoint_value(&session);
     let started = accepted_value(session.apply(input(
-        3,
+        4,
         user_message("turn-notification", "report status", "queue"),
     )));
 
     // Assert
-    assert_eq!(received["transition"]["next"]["type"], "none");
+    assert_eq!(received["transition"]["next"]["type"], "actions");
     assert_eq!(
         received["transition"]["observations"][0]["type"],
         "notification_received"
     );
+    let wake_turn_id = crate::core::testing::notification_turn_id("notification-1");
+    assert_eq!(
+        received["transition"]["observations"][1],
+        json!({"type": "turn_started", "turn_id": wake_turn_id, "content": []})
+    );
+    assert_eq!(
+        received["transition"]["observations"][2]["type"],
+        "notification_delivered"
+    );
+    assert_eq!(
+        answered["transition"]["turn"],
+        json!({"status": "completed", "turn_id": wake_turn_id, "output": [
+            {"type": "text", "text": "acknowledged"},
+        ]})
+    );
     assert_eq!(duplicate["transition"]["next"]["type"], "none");
     assert_eq!(duplicate["transition"]["observations"], json!([]));
     assert_eq!(after_duplicate, before_duplicate);
-    let messages = &started["transition"]["next"]["directives"][0]["action"]["model_input"]["messages"]
+    let wake_messages = &received["transition"]["next"]["directives"][0]["action"]["model_input"]["messages"]
         ["messages"];
-    let encoded_messages = serde_json::to_string(messages).expect("model messages serialize");
-    assert_eq!(encoded_messages.matches("build done").count(), 1);
+    assert_eq!(
+        serde_json::to_string(wake_messages)
+            .expect("model messages serialize")
+            .matches("build done")
+            .count(),
+        1
+    );
+    // The notification was already delivered into the wake Turn: the next Turn's
+    // model input is an append of its own messages, not another delivery.
+    let user_messages = &started["transition"]["next"]["directives"][0]["action"]["model_input"]["messages"]
+        ["messages"];
+    assert_eq!(
+        serde_json::to_string(user_messages)
+            .expect("model messages serialize")
+            .matches("build done")
+            .count(),
+        0
+    );
 }
 
 ///

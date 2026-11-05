@@ -525,7 +525,7 @@ fn apply_lifecycle_hook_resolution(
             Ok(outcome)
         }
         HookResolution::CommitPreAgentTurn { turn_id, message } => {
-            commit_turn(state, turn_id, message)
+            commit_turn(state, turn_id, Some(message))
         }
         HookResolution::ResolveCompletion(resolution) => {
             apply_completion_event(state, CompletionEvent::Hook(resolution), determinism)
@@ -931,16 +931,16 @@ fn start_turn(
         });
         return Ok(Outcome::action(pending_single_action(state)?));
     }
-    commit_turn(state, turn_id, message)
+    commit_turn(state, turn_id, Some(message))
 }
 
 fn commit_turn(
     state: &mut HarnessState,
     turn_id: String,
-    message: StoredMessage,
+    message: Option<StoredMessage>,
 ) -> Result<Outcome, CoreError> {
-    let content = match &message.message {
-        Message::User { content } => content.clone(),
+    let content = match message.as_ref().map(|message| &message.message) {
+        Some(Message::User { content }) => content.clone(),
         _ => Vec::new(),
     };
     let mut outcome = Outcome::quiet();
@@ -974,7 +974,9 @@ fn commit_turn(
             notification,
         });
     }
-    messages.push(message);
+    if let Some(message) = message {
+        messages.push(message);
+    }
     state.context.extend_new_turn(messages)?;
     let phase = next_completion(state)?;
     state.turn = TurnState::Active(ActiveTurn {
@@ -988,6 +990,18 @@ fn commit_turn(
     let action = pending_single_action(state)?;
     outcome.absorb(outcome_for_action(state, action)?);
     Ok(outcome)
+}
+
+/// Starts a Turn that only delivers ready notifications, with no user message
+/// to anchor it. Same lifetime as any other Turn: the model answers what the
+/// notifications said, and the Turn ends when its candidate has no tool
+/// execution to continue with. Skips `pre_agent_turn` hooks, which apply to the
+/// user content this Turn does not have.
+pub(crate) fn commit_notification_turn(
+    state: &mut HarnessState,
+    turn_id: String,
+) -> Result<Outcome, CoreError> {
+    commit_turn(state, turn_id, None)
 }
 
 /// Why the Runtime closes the active turn before the turn completes.

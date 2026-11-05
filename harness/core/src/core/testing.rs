@@ -15,6 +15,7 @@ pub(crate) use serde_json::json;
 pub(crate) use crate::core::action_id::{
     compaction as compaction_action_id, compaction_attempt as compaction_attempt_action_id,
     completion as completion_action_id, hook as derived_hook_action_id,
+    notification_turn as notification_turn_id,
 };
 pub(crate) use crate::core::capabilities::{HookBinding, HookSelector};
 pub(crate) use crate::core::config::{

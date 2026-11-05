@@ -124,6 +124,7 @@ impl HarnessState {
             TurnState::Active(_) | TurnState::Compacting { .. } => Delivery::Deferred,
             TurnState::Idle | TurnState::Terminal { .. } => Delivery::Immediate,
         };
+        let notification_turn = crate::core::action_id::notification_turn(&notification.id);
         let acceptance = self.notifications.accept(
             notification.clone(),
             delivery,
@@ -138,6 +139,15 @@ impl HarnessState {
             turn_id,
             notification,
         });
+        // A session without a Turn never takes the queued notification out of
+        // its queue: it would only surface with the next user message. Deliver
+        // it now by opening a notification-only Turn instead.
+        if matches!(self.turn, TurnState::Idle | TurnState::Terminal { .. }) {
+            outcome.absorb(crate::core::turn::commit_notification_turn(
+                self,
+                notification_turn,
+            )?);
+        }
         Ok(outcome)
     }
 

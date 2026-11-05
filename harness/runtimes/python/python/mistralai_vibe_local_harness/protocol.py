@@ -1303,8 +1303,9 @@ class RustActionAbandonedObservation(RustProtocolModel):
 
 class RustTurnStartedObservation(RustProtocolModel):
     type: Literal["turn_started"] = "turn_started"
+    # A notification-only Turn carries no user content.
     turn_id: str
-    content: list[RustContentBlock] = Field(min_length=1)
+    content: list[RustContentBlock] = Field(default_factory=list)
 
 
 class RustTurnSteeringReceivedObservation(RustProtocolModel):

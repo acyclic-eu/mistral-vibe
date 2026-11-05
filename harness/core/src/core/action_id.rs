@@ -26,6 +26,12 @@ pub(crate) fn tool(origin: &str, operation_id: &str) -> String {
     derive("tool", &[origin, operation_id])
 }
 
+/// The Turn a notification-only delivery opens, derived from the
+/// notification's identity so replaying the same delivery names the same Turn.
+pub(crate) fn notification_turn(notification_id: &str) -> String {
+    derive("notification-turn", &[notification_id])
+}
+
 pub(crate) fn hook(subject_action_id: &str, point: &str) -> String {
     derive("hook", &[subject_action_id, point])
 }

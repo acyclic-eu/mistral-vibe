@@ -728,21 +728,24 @@ fn preserves_conversation_groups_and_sources_when_imported_and_restored() {
         "level": "info",
         "message": "Archive research completed",
     });
-    parent.apply(
-        json!({"type": "notification", "notification": notification}),
-        completed(
-            "old",
-            vec![json!({"type": "text", "text": "archive requested"})],
+    let wake_turn = crate::core::testing::notification_turn_id("archive-result");
+    let wake = parent
+        .apply(
+            json!({"type": "notification", "notification": notification}),
+            running(&wake_turn)
+                .dispatch(llm_call(0))
+                .observe(json!({"type":"notification_received", "notification": notification}))
+                .observe(json!({"type":"turn_started", "turn_id": wake_turn, "content": []}))
+                .observe(notification_delivered(&wake_turn, notification.clone())),
         )
-        .observe(json!({"type": "notification_received", "notification": notification})),
-    );
+        .only_action();
+    parent.finish_turn_with_text(&wake_turn, &wake, "archive received");
     let current = parent
         .apply(
             user_message("current", "read both reports", "queue"),
             running("current")
                 .dispatch(llm_call(0))
-                .observe(turn_started("current", "read both reports"))
-                .observe(notification_delivered("current", notification)),
+                .observe(turn_started("current", "read both reports")),
         )
         .only_action();
     let calls = vec![
@@ -795,6 +798,9 @@ fn preserves_conversation_groups_and_sources_when_imported_and_restored() {
                 }),
                 "injection",
             ),
+            entry(model_assistant_text("archive received"), "history"),
+        ],
+        vec![
             entry(model_user_text("read both reports"), "history"),
             entry(model_assistant_tool_calls(&calls), "history"),
             entry(
@@ -822,6 +828,6 @@ fn preserves_conversation_groups_and_sources_when_imported_and_restored() {
     assert_eq!(conversation_groups(&after_restore), expected_groups);
     assert_eq!(
         conversation_groups(&child.export_conversation(forked(json!(1)))),
-        vec![expected_groups[1].clone()]
+        vec![expected_groups[2].clone()]
     );
 }

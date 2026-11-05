@@ -494,11 +494,11 @@ fn agent_message_start_and_steering_share_turn_semantics_through_restore() {
     runtime.finish_turn_with_text("child-turn", &next, "incorporated");
 }
 
-/// *Prepare*: An idle Session retains attributed input in its bounded notification state.
-/// *Do*: Restore, retry the same delivery, then start a Turn and retry after model-context commit.
-/// *Assert*: The input precedes new work once, and retries do not make model input unseen again.
+/// *Prepare*: An idle Session has no Turn to receive an attributed agent message.
+/// *Do*: Deliver it, restore, then retry the same delivery and start ordinary user work.
+/// *Assert*: The message opens a notification-only Turn once, and retries do not reopen it.
 #[test]
-fn pending_agent_message_survives_restore_and_is_seen_once_before_new_input() {
+fn idle_agent_message_wakes_one_notification_turn_and_is_seen_once_across_restore() {
     // Prepare
     let mut runtime = SynchronousRuntime::new(config());
     let notification = json!({
@@ -506,50 +506,98 @@ fn pending_agent_message_survives_restore_and_is_seen_once_before_new_input() {
         "level":"info", "message":"Agent input", "content":[{"type":"text", "text":"retained advice"}],
     });
     let command = json!({"type":"notification", "notification":notification});
-    runtime.apply(
-        command.clone(),
-        idle().observe(json!({"type":"notification_received", "notification":notification})),
-    );
-    assert_eq!(runtime.inspection_value()["has_pending_model_input"], true);
-
-    assert_eq!(
-        runtime.checkpoint_value()["notifications"][0]["notification"]["source"],
-        json!({
-            "type":"agent_message", "sender_agent_path":"/root/child",
-        }),
-    );
+    let wake_turn = crate::core::testing::notification_turn_id("delivery");
 
     // Do
-    runtime.restart_from_checkpoint();
-    runtime.apply(command.clone(), idle());
     let first = runtime
+        .apply(
+            command.clone(),
+            running(&wake_turn)
+                .dispatch(llm_call(0))
+                .observe(json!({"type":"notification_received", "notification":notification}))
+                .observe(json!({"type":"turn_started", "turn_id":wake_turn, "content":[]}))
+                .observe(notification_delivered(&wake_turn, notification.clone())),
+        )
+        .only_action();
+    runtime.assert_last_model_message_update(&first, "replace", &[
+        model_system(),
+        json!({"role":"user", "content":attributed_agent_content("message", "/root/child", "retained advice")}),
+    ]);
+    assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
+    runtime.finish_turn_with_text(&wake_turn, &first, "noted");
+
+    runtime.restart_from_checkpoint();
+    runtime.apply(
+        command.clone(),
+        completed(&wake_turn, vec![json!({"type": "text", "text": "noted"})]),
+    );
+    let second = runtime
         .apply(
             user_message("parent-turn", "new work", "queue"),
             running("parent-turn")
                 .dispatch(llm_call(0))
-                .observe(turn_started("parent-turn", "new work"))
-                .observe(notification_delivered("parent-turn", notification)),
+                .observe(turn_started("parent-turn", "new work")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(&second, "replace", &[
+        model_system(),
+        json!({"role":"user", "content":attributed_agent_content("message", "/root/child", "retained advice")}),
+        model_assistant_text("noted"),
+        model_user_text("new work"),
+    ]);
+    assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
+    runtime.restart_from_checkpoint();
+    runtime.apply(command, running("parent-turn").keep(&second));
+    assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
+    runtime.finish_turn_with_text("parent-turn", &second, "done");
+}
+
+/// *Prepare*: An idle Session has registered tools with pending work, summarized as a digest notification.
+/// *Do*: Deliver the digest while no Turn runs.
+/// *Assert*: The digest opens a Turn whose only model input is the attributed digest, without a user message.
+#[test]
+fn idle_tool_pending_digest_notification_wakes_the_session() {
+    // Prepare
+    let mut runtime = SynchronousRuntime::new(config());
+    let notification = json!({
+        "id":"digest-1", "source":{"type":"agent_message", "sender_agent_path":"/ii/bridge"},
+        "level":"info", "message":"check: ii_inbox (2), comms_inbox (1)",
+        "content":[{"type":"text", "text":"check: ii_inbox (2), comms_inbox (1)"}],
+    });
+    let command = json!({"type":"notification", "notification":notification});
+    let wake_turn = crate::core::testing::notification_turn_id("digest-1");
+
+    // Do
+    let first = runtime
+        .apply(
+            command.clone(),
+            running(&wake_turn)
+                .dispatch(llm_call(0))
+                .observe(json!({"type":"notification_received", "notification":notification}))
+                .observe(json!({"type":"turn_started", "turn_id":wake_turn, "content":[]}))
+                .observe(notification_delivered(&wake_turn, notification.clone())),
         )
         .only_action();
 
     // Assert
     runtime.assert_last_model_message_update(&first, "replace", &[
         model_system(),
-        json!({"role":"user", "content":attributed_agent_content("message", "/root/child", "retained advice")}),
-        model_user_text("new work"),
+        json!({"role":"user", "content":attributed_agent_content("message", "/ii/bridge", "check: ii_inbox (2), comms_inbox (1)")}),
     ]);
-    assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
-    runtime.restart_from_checkpoint();
-    runtime.apply(command, running("parent-turn").keep(&first));
-    assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
-    runtime.finish_turn_with_text("parent-turn", &first, "done");
+    runtime.finish_turn_with_text(&wake_turn, &first, "checked");
+    runtime.apply(
+        command,
+        completed(&wake_turn, vec![json!({"type": "text", "text": "checked"})]),
+    );
 }
 
-/// *Prepare*: An idle Session receives a typed result without starting a Turn.
-/// *Do*: Restore, retry delivery, and start ordinary user work.
-/// *Assert*: Core retains the exact result and renders it once without delivery identities.
+/// *Prepare*: An idle Session receives a typed result without user work to attach it to.
+/// *Do*: Wake on it, restore, retry delivery, and start ordinary user work.
+/// *Assert*: Core delivers the exact result once and renders it once without delivery identities.
 #[test]
-fn agent_results_survive_restore_and_are_seen_once_before_new_input() {
+fn idle_agent_results_wake_one_notification_turn_and_are_seen_once_across_restore() {
     for (termination, rendered) in [
         (
             json!({"outcome":"completed", "output":{"answer":42}}),
@@ -603,40 +651,51 @@ fn agent_results_survive_restore_and_are_seen_once_before_new_input() {
             "level":"info", "message":"Private delivery summary",
         });
         let command = json!({"type":"notification", "notification":notification});
-        runtime.apply(
-            command.clone(),
-            idle().observe(json!({"type":"notification_received", "notification":notification})),
-        );
-        assert_eq!(runtime.inspection_value()["has_pending_model_input"], true);
-        assert_eq!(
-            runtime.checkpoint_value()["notifications"][0]["notification"]["source"],
-            source
-        );
+        let wake_turn = crate::core::testing::notification_turn_id("private-delivery-id");
 
         // Do
-        runtime.restart_from_checkpoint();
-        runtime.apply(command.clone(), idle());
         let first = runtime
+            .apply(
+                command.clone(),
+                running(&wake_turn)
+                    .dispatch(llm_call(0))
+                    .observe(json!({"type":"notification_received", "notification":notification}))
+                    .observe(json!({"type":"turn_started", "turn_id":wake_turn, "content":[]}))
+                    .observe(notification_delivered(&wake_turn, notification.clone())),
+            )
+            .only_action();
+        runtime.assert_last_model_message_update(&first, "replace", &[
+        model_system(),
+        json!({"role":"user", "content":attributed_agent_content("result", "/root/child", rendered)}),
+    ]);
+        assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
+        runtime.finish_turn_with_text(&wake_turn, &first, "noted");
+        runtime.restart_from_checkpoint();
+        runtime.apply(
+            command.clone(),
+            completed(&wake_turn, vec![json!({"type": "text", "text": "noted"})]),
+        );
+        let second = runtime
             .apply(
                 user_message("parent-turn", "new work", "queue"),
                 running("parent-turn")
                     .dispatch(llm_call(0))
-                    .observe(turn_started("parent-turn", "new work"))
-                    .observe(notification_delivered("parent-turn", notification)),
+                    .observe(turn_started("parent-turn", "new work")),
             )
             .only_action();
 
         // Assert
-        runtime.assert_last_model_message_update(&first, "replace", &[
+        runtime.assert_last_model_message_update(&second, "replace", &[
         model_system(),
         json!({"role":"user", "content":attributed_agent_content("result", "/root/child", rendered)}),
+        model_assistant_text("noted"),
         model_user_text("new work"),
     ]);
         assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
         runtime.restart_from_checkpoint();
-        runtime.apply(command, running("parent-turn").keep(&first));
+        runtime.apply(command, running("parent-turn").keep(&second));
         assert_eq!(runtime.inspection_value()["has_pending_model_input"], false);
-        runtime.finish_turn_with_text("parent-turn", &first, "done");
+        runtime.finish_turn_with_text("parent-turn", &second, "done");
     }
 }
 
