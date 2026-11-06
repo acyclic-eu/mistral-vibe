@@ -209,6 +209,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/list",
     "session/log/read",
     "session/markAsSeen",
+    "session/notification/submit",
     "session/pin",
     "session/archive",
     "session/read",
@@ -292,6 +293,7 @@ SERVER_METHODS: tuple[str, ...] = (
 )
 
 EXPERIMENTAL_SERVER_METHODS: frozenset[str] = frozenset({
+    "session/notification/submit",
     "session/subagents/interrupt",
     "session/subagents/read",
     "session/subagents/wait",
@@ -2860,6 +2862,27 @@ class ContextInjectParams(ProtocolModel):
 
 class ContextInjectResponse(ProtocolModel):
     entries: list[PublicHistoryEntry]
+
+
+class SessionNotificationSubmitParams(ProtocolModel):
+    """One Runtime notification submitted to a session from the outside.
+
+    The payload must stay a wake signal, not a message: it carries a summary
+    ("tools have pending work") that reaches the model as an injected,
+    non-user message. Any message content the summary points at flows through
+    the tools the model then calls.
+    """
+
+    session_id: str
+    message: str
+    # Attribution for the model-visible header; names the submitting system.
+    sender: str = "external"
+
+
+class SessionNotificationSubmitResponse(ProtocolModel):
+    # An idle session opens a turn to deliver the notification; a running
+    # session queues it, so no turn starts for this submission.
+    turn_started: bool
 
 
 class CallbackCallParams(ProtocolModel):

@@ -87,6 +87,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHost,
     SessionBackendHostArchive,
     SessionBackendHostPin,
+    SessionBackendNotificationSubmitter,
     SessionBackendQueuedTurnEditing,
     SessionBackendResult,
     SessionBackendRuntimeView,
@@ -182,6 +183,7 @@ from vibe.app_server.protocol import (
     SessionKind,
     SessionListParams,
     SessionListResponse,
+    SessionNotificationSubmitParams,
     SessionOptions,
     SessionPinParams,
     SessionPinResponse,
@@ -2621,6 +2623,53 @@ async def test_a_follow_up_queued_during_a_peer_turn_leaves_its_hold(
 
     # Assert
     assert (during_follow_up, during_peer_turn, awaits_user()) == (True, True, False)
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_notification_submission_reaches_the_harness_session(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: An open session whose Runtime queue is replaced by a stub.
+    *Do*: Confirm the session backend port routes notification submissions to
+        the harness session, once for a waking submit and once for a queued one.
+    *Assert*: The notification keeps its wake-only payload (message and sender,
+        no user entry) and whether a turn started returns to the client.
+    """
+    # Prepare
+    host = cast(Any, _persisting_host(tmp_path))
+    opened = await host.start(SessionStartParams())
+    backend = opened.backend
+    turn_states = iter([True, False])
+    backend._session.submit_notification = AsyncMock(
+        side_effect=lambda _params: SimpleNamespace(
+            response={"turn_started": next(turn_states)}, after_response=None
+        )
+    )
+
+    # Do
+    started = await backend.submit_notification(
+        SessionNotificationSubmitParams(
+            session_id=backend.session_id,
+            message="check: ii_inbox (2), comms_inbox (1)",
+            sender="ii-hub",
+        )
+    )
+    queued = await backend.submit_notification(
+        SessionNotificationSubmitParams(
+            session_id=backend.session_id, message="register: ii_inbox ready"
+        )
+    )
+
+    # Assert
+    assert started.response.turn_started is True
+    assert queued.response.turn_started is False
+    first, second = backend._session.submit_notification.await_args_list
+    assert first.args[0].session_id == backend.session_id
+    assert first.args[0].message == "check: ii_inbox (2), comms_inbox (1)"
+    assert first.args[0].sender == "ii-hub"
+    assert second.args[0].sender == "external"
+    assert isinstance(backend, SessionBackendNotificationSubmitter)
     await host.shutdown()
 
 

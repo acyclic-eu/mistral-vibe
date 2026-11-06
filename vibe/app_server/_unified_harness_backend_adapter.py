@@ -575,6 +575,8 @@ from vibe.app_server.protocol import (
     SessionLogReadParams,
     SessionLogReadResponse,
     SessionMarkAsSeenParams,
+    SessionNotificationSubmitParams,
+    SessionNotificationSubmitResponse,
     SessionOpenParams,
     SessionOptions,
     SessionPinParams,
@@ -10473,6 +10475,20 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                     )
                 ]
             ),
+            after_response=result.after_response,
+        )
+
+    async def submit_notification(
+        self, params: SessionNotificationSubmitParams
+    ) -> SessionBackendResult[SessionNotificationSubmitResponse]:
+        # No _reject_active_turn here: a notification is valid mid-turn too,
+        # where Core queues it and delivers it with the next model input.
+        self._require_model_owned_root(params.session_id)
+        result = cast(
+            Any, await _harness_call(self._session.submit_notification(params))
+        )
+        return SessionBackendResult(
+            response=SessionNotificationSubmitResponse.model_validate(result.response),
             after_response=result.after_response,
         )
 

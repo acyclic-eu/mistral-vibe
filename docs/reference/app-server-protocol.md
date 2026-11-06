@@ -92,6 +92,14 @@ Expected turn IDs reject stale control requests. If enqueue finds an idle,
 unpaused session, exactly one item is promoted after the enqueue response.
 This handles busy-submit races without changing `turn/start` semantics.
 
+`session/notification/submit` queues one Runtime notification on a session.
+Unlike a queued turn it is not a user entry and cannot trigger tools by
+itself: the model sees the message as injected, attributed input. An idle
+session opens a notification-only turn that delivers it immediately; a
+running session holds it for the next model input. A submitter only names
+pending work ("check: ii_inbox (2)"); any payload flows through the tools
+the session itself calls afterwards.
+
 ## Accepted turn queue
 
 Queue state belongs to the live session Runtime. It is currently process-local,

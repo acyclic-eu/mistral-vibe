@@ -44,6 +44,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostRelocate,
     SessionBackendHostSeenState,
     SessionBackendNotificationSink,
+    SessionBackendNotificationSubmitter,
     SessionBackendOpenCallbacks,
     SessionBackendQueuedTurnEditing,
     SessionBackendQueuedTurnSteering,
@@ -127,6 +128,7 @@ from vibe.app_server.protocol import (
     SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
+    SessionNotificationSubmitParams,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
     SessionPeerListParams,
@@ -232,6 +234,7 @@ _SESSION_BACKEND_METHODS = frozenset({
     "session/agent/update",
     "session/compact",
     "session/context/inject",
+    "session/notification/submit",
     "session/settings/update",
     "session/turn/enqueue",
     "session/turn/queue/edit/abandon",
@@ -1429,6 +1432,17 @@ class AppServer:
         if method == "session/context/inject":
             result = await root.inject_context(
                 validate_wire(ContextInjectParams, raw_params)
+            )
+            return DispatchResult(result.response, after_response=result.after_response)
+        if method == "session/notification/submit":
+            if not isinstance(root, SessionBackendNotificationSubmitter):
+                raise RequestFailure(
+                    ProtocolErrorCode.NOT_IMPLEMENTED,
+                    "The selected session backend does not support "
+                    "notification submission",
+                )
+            result = await root.submit_notification(
+                validate_wire(SessionNotificationSubmitParams, raw_params)
             )
             return DispatchResult(result.response, after_response=result.after_response)
         if method == "session/compact":

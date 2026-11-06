@@ -56,6 +56,8 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
+    SessionNotificationSubmitParams,
+    SessionNotificationSubmitResponse,
     SessionPinParams,
     SessionPinResponse,
     SessionReadParams,
@@ -520,6 +522,21 @@ class SessionBackend(Protocol):
     ) -> SessionBackendResult[SessionCompactResponse]: ...
 
     async def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendNotificationSubmitter(Protocol):
+    """Optional submission of model-visible, non-user notifications.
+
+    A submitting system (another agent, a bridge process) wakes or informs the
+    session this way: an idle session opens a notification-only turn that
+    carries the message to the model, and a running session queues it for its
+    next model input.
+    """
+
+    async def submit_notification(
+        self, params: SessionNotificationSubmitParams
+    ) -> SessionBackendResult[SessionNotificationSubmitResponse]: ...
 
 
 @runtime_checkable

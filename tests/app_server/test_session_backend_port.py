@@ -14,6 +14,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendError,
     SessionBackendEvent,
     SessionBackendHost,
+    SessionBackendNotificationSubmitter,
     SessionBackendQueuedTurnEditing,
     SessionBackendQueuedTurnSteering,
     SessionEventSubscription,
@@ -67,6 +68,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "session/agent/update",
         "session/compact",
         "session/context/inject",
+        "session/notification/submit",
         "session/settings/update",
         "session/turn/enqueue",
         "session/turn/queue/edit/abandon",
@@ -90,6 +92,9 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "start_queued_turn_edit",
     }
     assert _protocol_members(SessionBackendQueuedTurnSteering) == {"steer_queued_turn"}
+    assert _protocol_members(SessionBackendNotificationSubmitter) == {
+        "submit_notification"
+    }
 
 
 def test_session_backend_host_contract_owns_session_selection() -> None:

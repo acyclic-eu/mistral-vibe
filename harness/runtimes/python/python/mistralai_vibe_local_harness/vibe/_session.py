@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from pydantic import JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
+    RustAgentMessageNotificationSource,
     RustBlobResourceContents,
     RustContentBlock,
     RustContextMessageEvent,
@@ -26,6 +27,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessCapabilitySet,
     RustHarnessConfig,
     RustHarnessHookBinding,
+    RustHarnessNotification,
     RustImageContentBlock,
     RustPluginContextDefinition,
     RustProtocolError,
@@ -2209,6 +2211,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         async with self._lifecycle_lock:
             return await self._inject_context(params)
 
+    async def submit_notification(self, params: object) -> object:
+        async with self._lifecycle_lock:
+            return await self._submit_notification(params)
+
     async def record_host_effect(self, record: HostEffectRecord) -> object:
         """Persist one Host-authored terminal effect in public history.
 
@@ -2274,6 +2280,36 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             await runtime.append_public_history_entries([entry])
             entries.append(entry)
         return _SessionBackendResult(response={"entries": entries})
+
+    async def _submit_notification(self, params: object) -> object:
+        self._reject_compaction()
+        raw = cast(Any, params)
+        _required_str(raw, "session_id")
+        message = _required_str(raw, "message")
+        sender = getattr(raw, "sender", None) or "external"
+        sender_path = sender if sender.startswith("/") else f"/{sender}"
+        notification = RustHarnessNotification(
+            id=f"client-submitted:{secrets.token_hex(16)}",
+            source=RustAgentMessageNotificationSource(sender_agent_path=sender_path),
+            level="info",
+            message=message,
+            content=[RustTextContentBlock(text=message)],
+        )
+        runtime = await self._runtime_for_turn_locked(
+            promotion_conflict_id="notification-submission",
+            operation="submit_notification",
+        )
+        # deliver_notification drives the resulting Actions: an idle session
+        # opens its notification-only Turn, a running session just queues it.
+        transition = await runtime.deliver_notification(notification)
+        turn_started = any(
+            observation.type == "turn_started"
+            for observation in transition.observations
+        )
+        logger.info(
+            "Delivered a submitted notification (turn_started=%s)", turn_started
+        )
+        return _SessionBackendResult(response={"turn_started": turn_started})
 
     async def respond_to_callback(self, params: object) -> object:
         settlement = asyncio.create_task(self._settle_callback_response(params))
