@@ -123,6 +123,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPHTTPTransportPolicy,
     MCPRouteSnapshot,
     MCPSamplingCompletion,
+    MCPToolDigestSink,
     MCPTransportFactory,
     ResolvedMCPCatalog,
 )
@@ -2769,7 +2770,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 "reason": signal.reason,
             })
 
-        mcp_runtime = self._new_mcp_runtime(event_sink=publish_mcp_event)
+        mcp_runtime = self._new_mcp_runtime(
+            event_sink=publish_mcp_event,
+            tool_digest_sink=self._session_tool_digest_sink(
+                lambda: session if session is not None else None
+            ),
+        )
         connector_runtime = self._new_connector_runtime(
             event_sink=publish_connector_event
         )
@@ -3252,7 +3258,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             })
 
         mcp_runtime = (
-            self._new_mcp_runtime(event_sink=publish_mcp_event)
+            self._new_mcp_runtime(
+                event_sink=publish_mcp_event,
+                tool_digest_sink=self._session_tool_digest_sink(
+                    lambda: session if session is not None else None
+                ),
+            )
             if integrations_enabled
             else None
         )
@@ -3598,10 +3609,43 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             self._subagent_pins[controller] = (base, adapter)
         await controller.reconcile_actions(runtime.pending_action_ids)
 
+    def _session_tool_digest_sink(
+        self, session: Callable[[], UnifiedHarnessSessionBackend | None]
+    ) -> MCPToolDigestSink:
+        """Bind the MCP tool-pending digest to the Session being opened.
+
+        The sink resolves the Session at delivery time: the MCP runtime is
+        built before the Session object exists, and a digest can arrive any
+        time after it does. queue_tool_digest schedules the notification and
+        returns, so the server's transport never waits on the turn the wake
+        opens.
+        """
+
+        async def deliver_tool_digest(server_name: str, digest: str) -> None:
+            # Discovery runs while the session is still being built, so a
+            # digest that arrives there waits briefly for the session to
+            # exist instead of dropping the wake.
+            target = session()
+            waited = 0.0
+            while target is None and waited < 30.0:
+                await asyncio.sleep(0.05)
+                waited += 0.05
+                target = session()
+            if target is None:
+                logger.warning(
+                    "Dropping a tool-pending digest from %r: session is not bound",
+                    server_name,
+                )
+                return
+            target.queue_tool_digest(message=digest, sender=server_name)
+
+        return deliver_tool_digest
+
     def _new_mcp_runtime(
         self,
         *,
         event_sink: Callable[[MCPAuthorizationRequiredSignal], None] | None = None,
+        tool_digest_sink: MCPToolDigestSink | None = None,
     ) -> MCPRuntime | None:
         provider = self._mcp_authorization_provider
         if provider is None:
@@ -3624,6 +3668,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             transport_factory=self._mcp_transport_factory,
             stdio_pool=self._stdio_pool(),
             event_sink=event_sink,
+            tool_digest_sink=tool_digest_sink,
             claimed_groups=claimed_groups,
             discovery_flights=self._mcp_discovery_flights,
         )

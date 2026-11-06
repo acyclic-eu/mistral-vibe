@@ -34,6 +34,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPRuntimeFailure,
     MCPSamplingCallback,
     MCPSamplingCompletion,
+    MCPToolDigestSink,
     MCPSourceState,
     MCPTransportFactory,
     ResolvedMCPCatalog,
@@ -171,6 +172,7 @@ class MCPRuntime:
         transport_factory: MCPTransportFactory | None = None,
         stdio_pool: MCPStdioPool | None = None,
         sampling_completion: MCPSamplingCompletion | None = None,
+        tool_digest_sink: MCPToolDigestSink | None = None,
         event_sink: MCPRuntimeEventSink | None = None,
         claimed_groups: frozenset[str] = frozenset(),
         discovery_concurrency: int = 4,
@@ -187,6 +189,7 @@ class MCPRuntime:
         self._owned_pool: MCPStdioPool | None = None
         self._lease: MCPStdioPoolLease | None = None
         self._sampling_completion = sampling_completion
+        self._tool_digest_sink = tool_digest_sink
         self._event_sink = event_sink
         self._claimed_groups = claimed_groups
         self._discovery_concurrency = discovery_concurrency
@@ -1003,7 +1006,14 @@ class MCPRuntime:
         self, server: ResolvedMCPServerConfig, authorization: MCPAuthorizationSnapshot
     ) -> tuple[MCPRemoteToolDescriptor, ...]:
         if server.transport == "stdio":
-            return await self._stdio_lease().list_tools(server)
+            # Hold the server's process while a digest sink is bound: it exists
+            # to push ``vibe/tool-pending-digest``, and a released stdio
+            # connection cannot - releases tear the process down once the
+            # answering worker drains. Without a sink, keep the open-discover
+            # behaviour: the process left when the answer returned.
+            return await self._stdio_lease().list_tools(
+                server, persistent=self._tool_digest_sink is not None
+            )
         from mistralai_vibe_local_harness.vibe._mcp_transport import discover_http
 
         return await discover_http(
@@ -1011,6 +1021,7 @@ class MCPRuntime:
             authorization,
             http_transport_policy=self._http_transport_policy,
             sampling_callback=self._sampling_callback(server),
+            digest_sink=self._tool_digest_sink,
         )
 
     async def _call_http(
@@ -1030,6 +1041,7 @@ class MCPRuntime:
             tool_name=tool_name,
             arguments=arguments,
             sampling_callback=sampling_callback,
+            digest_sink=self._tool_digest_sink,
         )
 
     def _stdio_lease(self) -> MCPStdioPoolLease:
@@ -1041,7 +1053,7 @@ class MCPRuntime:
                     sampling_completion=self._sampling_completion,
                 )
                 self._owned_pool = pool
-            self._lease = pool.lease()
+            self._lease = pool.lease(self._tool_digest_sink)
         return self._lease
 
     def _sampling_callback(

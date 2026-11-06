@@ -228,6 +228,15 @@ class _QueuedTurnEditSaveReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolDigestNotification:
+    """A tool-pending digest from an MCP server, en route to the Session."""
+
+    session_id: str
+    message: str
+    sender: str
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessSessionSubscription:
     """A complete snapshot plus the events committed after its watermark."""
 
@@ -2214,6 +2223,25 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     async def submit_notification(self, params: object) -> object:
         async with self._lifecycle_lock:
             return await self._submit_notification(params)
+
+    def queue_tool_digest(self, *, message: str, sender: str) -> None:
+        """Deliver one MCP tool-pending digest without blocking the caller.
+
+        The digest travels through the notification channel as its own task:
+        an MCP server's receive loop must never wait on the turn the digest
+        wakes, and a failed delivery is logged, not raised into it.
+        """
+        if not message.strip():
+            return
+        logger.info("Queueing a tool-pending digest from sender %r", sender)
+        task = asyncio.create_task(
+            self.submit_notification(
+                ToolDigestNotification(
+                    session_id=self._session_id, message=message, sender=sender
+                )
+            )
+        )
+        task.add_done_callback(_log_tool_digest_failure)
 
     async def record_host_effect(self, record: HostEffectRecord) -> object:
         """Persist one Host-authored terminal effect in public history.
@@ -4505,6 +4533,13 @@ def _json_value(value: object) -> JsonValue:
         dumped = cast(Any, value).model_dump(mode="json", by_alias=True)
         return cast(JsonValue, dumped)
     return cast(JsonValue, value)
+
+
+def _log_tool_digest_failure(task: asyncio.Task[object]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Delivering a tool-pending digest failed: %s", task.exception()
+        )
 
 
 def _required_str(params: object, field: str) -> str:

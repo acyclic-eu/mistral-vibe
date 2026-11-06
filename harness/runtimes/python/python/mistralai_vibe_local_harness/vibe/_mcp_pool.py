@@ -13,6 +13,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPRemoteToolDescriptor,
     MCPSamplingCallback,
     MCPSamplingCompletion,
+    MCPToolDigestSink,
     MCPTransportDisconnected,
     MCPTransportFactory,
     ResolvedMCPServerConfig,
@@ -34,10 +35,12 @@ class _PooledConnection:
         factory: MCPTransportFactory,
         server: ResolvedMCPServerConfig,
         sampling_callback: MCPSamplingCallback | None,
+        digest_sink: MCPToolDigestSink | None = None,
     ) -> None:
         self._factory = factory
         self._server = server
         self._sampling_callback = sampling_callback
+        self._digest_sink = digest_sink
         self._requests: asyncio.Queue[_Request | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._connection: MCPClientConnection | None = None
@@ -116,7 +119,9 @@ class _PooledConnection:
     async def _ensure_connection(self) -> MCPClientConnection:
         if self._connection is None:
             self._connection = await self._factory.open_stdio(
-                self._server, sampling_callback=self._sampling_callback
+                self._server,
+                sampling_callback=self._sampling_callback,
+                digest_sink=self._digest_sink,
             )
         return self._connection
 
@@ -173,8 +178,8 @@ class MCPStdioPool:
         self._lock = asyncio.Lock()
         self._closed = False
 
-    def lease(self) -> MCPStdioPoolLease:
-        return MCPStdioPoolLease(self)
+    def lease(self, digest_sink: MCPToolDigestSink | None = None) -> MCPStdioPoolLease:
+        return MCPStdioPoolLease(self, digest_sink)
 
     async def acquire(
         self, lease: MCPStdioPoolLease, server: ResolvedMCPServerConfig
@@ -188,7 +193,13 @@ class MCPStdioPool:
             connection = self._connections.get(key)
             if connection is None:
                 connection = _PooledConnection(
-                    self._resolve_factory(), server, self._sampling_callback(server)
+                    self._resolve_factory(),
+                    server,
+                    self._sampling_callback(server),
+                    # One flow per process: a digest fans out to every lease
+                    # currently holding the shared server, so no Session is
+                    # preferred and none is skipped.
+                    self._digest_to_holders(key),
                 )
                 self._connections[key] = connection
             self._holders.setdefault(key, set()).add(lease)
@@ -220,6 +231,16 @@ class MCPStdioPool:
             self._connections.clear()
             self._holders.clear()
         await _close_all(connections, "Failed to close MCP stdio pool")
+
+    def _digest_to_holders(self, key: str) -> MCPToolDigestSink:
+        async def deliver_digest(server_name: str, digest: str) -> None:
+            # Snapshot the holders: a Session that acquires later also receives
+            # later digests, and one that released no longer does.
+            for lease in tuple(self._holders.get(key, ())):
+                if lease.digest_sink is not None:
+                    await lease.digest_sink(server_name, digest)
+
+        return deliver_digest
 
     def _release_locked(
         self, lease: MCPStdioPoolLease, key: str
@@ -262,8 +283,11 @@ class MCPStdioPool:
 class MCPStdioPoolLease:
     """One MCP Runtime's hold on the Host's stdio processes."""
 
-    def __init__(self, pool: MCPStdioPool) -> None:
+    def __init__(
+        self, pool: MCPStdioPool, digest_sink: MCPToolDigestSink | None = None
+    ) -> None:
         self._pool = pool
+        self.digest_sink = digest_sink
 
     async def list_tools(
         self, server: ResolvedMCPServerConfig, *, persistent: bool = False

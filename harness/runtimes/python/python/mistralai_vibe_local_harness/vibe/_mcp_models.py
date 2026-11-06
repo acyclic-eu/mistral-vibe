@@ -12,7 +12,7 @@ import re
 from types import MappingProxyType
 from typing import Literal, Protocol
 
-from pydantic import JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
 type JsonObject = dict[str, JsonValue]
 type JsonSchema = bool | JsonObject
@@ -328,6 +328,23 @@ type MCPSamplingCompletion = Callable[
     [MCPSamplingRequest], Awaitable[MCPSamplingResponse]
 ]
 
+# The notification method an MCP server sends to name its tools' pending work,
+# e.g. a bridge that queues messages for the session until it checks in.
+TOOL_PENDING_DIGEST_NOTIFICATION = "vibe/tool-pending-digest"
+
+
+class MCPToolPendingDigestParams(BaseModel):
+    """The payload of one ``vibe/tool-pending-digest`` notification."""
+
+    # The digest text naming the pending tools ("check: ii_inbox (2)"), never
+    # their content.
+    text: str = Field(min_length=1)
+
+# Receives one server-initiated tool-pending digest: the server's configured
+# name and the digest text ("check: ii_inbox (2)"). The digest carries no
+# message content; that flows when the session calls the named tools.
+type MCPToolDigestSink = Callable[[str, str], Awaitable[None]]
+
 
 class MCPTransportFactory(Protocol):
     async def open_stdio(
@@ -335,6 +352,7 @@ class MCPTransportFactory(Protocol):
         server: ResolvedMCPServerConfig,
         *,
         sampling_callback: MCPSamplingCallback | None,
+        digest_sink: MCPToolDigestSink | None = None,
     ) -> MCPClientConnection: ...
 
 
@@ -366,9 +384,12 @@ __all__ = [
     "MCPSamplingResponse",
     "MCPSourceState",
     "MCPToolDescriptor",
+    "MCPToolDigestSink",
+    "MCPToolPendingDigestParams",
     "MCPToolFilter",
     "MCPToolGroup",
     "MCPToolRoute",
+    "TOOL_PENDING_DIGEST_NOTIFICATION",
     "MCPTransportDisconnected",
     "MCPTransportFactory",
     "ResolvedMCPCatalog",

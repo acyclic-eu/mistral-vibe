@@ -13,6 +13,7 @@ import anyio
 import httpx2
 from mcp import ClientSession
 from mcp.client.auth import OAuthFlowError
+from mcp.client.extension import NotificationBinding
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import PaginatedRequestParams
@@ -31,9 +32,12 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPRemoteToolDescriptor,
     MCPRuntimeFailure,
     MCPSamplingCallback,
+    MCPToolDigestSink,
+    MCPToolPendingDigestParams,
     MCPTransportDisconnected,
     MCPTransportFactory,
     ResolvedMCPServerConfig,
+    TOOL_PENDING_DIGEST_NOTIFICATION,
 )
 from mistralai_vibe_local_harness.vibe._ssl import build_ssl_context
 
@@ -69,8 +73,37 @@ class UnifiedMCPTransportFactory(MCPTransportFactory):
         server: ResolvedMCPServerConfig,
         *,
         sampling_callback: MCPSamplingCallback | None,
+        digest_sink: MCPToolDigestSink | None = None,
     ) -> MCPClientConnection:
-        return await _StdioConnection.open(server, sampling_callback=sampling_callback)
+        return await _StdioConnection.open(
+            server, sampling_callback=sampling_callback, digest_sink=digest_sink
+        )
+
+
+def tool_pending_digest_binding(
+    server_name: str, digest_sink: MCPToolDigestSink
+) -> NotificationBinding[MCPToolPendingDigestParams]:
+    """The ClientSession binding that receives ``vibe/tool-pending-digest``.
+
+    The MCP SDK runs the binding's handler on its own task, decoupled from the
+    server's receive loop, so a digest delivery never blocks transport I/O.
+    """
+
+    async def deliver_digest(params: MCPToolPendingDigestParams) -> None:
+        try:
+            await digest_sink(server_name, params.text)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            logger.exception(
+                "Delivering a tool-pending digest from %r failed", server_name
+            )
+
+    return NotificationBinding(
+        method=TOOL_PENDING_DIGEST_NOTIFICATION,
+        params_type=MCPToolPendingDigestParams,
+        handler=deliver_digest,
+    )
 
 
 async def discover_http(
@@ -79,6 +112,7 @@ async def discover_http(
     *,
     http_transport_policy: MCPHTTPTransportPolicy,
     sampling_callback: MCPSamplingCallback | None = None,
+    digest_sink: MCPToolDigestSink | None = None,
 ) -> tuple[MCPRemoteToolDescriptor, ...]:
     if not server.url:
         raise MCPRuntimeFailure(
@@ -90,6 +124,7 @@ async def discover_http(
             authorization,
             http_transport_policy,
             sampling_callback=sampling_callback,
+            digest_sink=digest_sink,
         ) as session:
             return await _list_all_tools(session)
     except asyncio.CancelledError:
@@ -106,6 +141,7 @@ async def call_http(
     tool_name: str,
     arguments: JsonObject,
     sampling_callback: MCPSamplingCallback | None = None,
+    digest_sink: MCPToolDigestSink | None = None,
 ) -> MCPNormalizedResult:
     if not server.url:
         raise MCPRuntimeFailure(
@@ -117,6 +153,7 @@ async def call_http(
             authorization,
             http_transport_policy,
             sampling_callback=sampling_callback,
+            digest_sink=digest_sink,
         ) as session:
             result = await session.call_tool(
                 tool_name,
@@ -137,11 +174,13 @@ class _HttpSessionContext:
         authorization: MCPAuthorizationSnapshot,
         http_transport_policy: MCPHTTPTransportPolicy,
         sampling_callback: MCPSamplingCallback | None,
+        digest_sink: MCPToolDigestSink | None = None,
     ) -> None:
         self._server = server
         self._authorization = authorization
         self._http_transport_policy = http_transport_policy
         self._sampling_callback = sampling_callback
+        self._digest_sink = digest_sink
         self._stack = AsyncExitStack()
 
     async def __aenter__(self) -> ClientSession:
@@ -168,6 +207,15 @@ class _HttpSessionContext:
                     write,
                     read_timeout_seconds=server.startup_timeout_s,
                     sampling_callback=cast(Any, self._sampling_callback),
+                    notification_bindings=(
+                        None
+                        if self._digest_sink is None
+                        else [
+                            tool_pending_digest_binding(
+                                server.name, self._digest_sink
+                            )
+                        ]
+                    ),
                 )
             )
             await session.initialize()
@@ -224,9 +272,14 @@ def _http_session(
     http_transport_policy: MCPHTTPTransportPolicy,
     *,
     sampling_callback: MCPSamplingCallback | None,
+    digest_sink: MCPToolDigestSink | None = None,
 ) -> _HttpSessionContext:
     return _HttpSessionContext(
-        server, authorization, http_transport_policy, sampling_callback
+        server,
+        authorization,
+        http_transport_policy,
+        sampling_callback,
+        digest_sink,
     )
 
 
@@ -245,6 +298,7 @@ class _StdioConnection(MCPClientConnection):
         server: ResolvedMCPServerConfig,
         *,
         sampling_callback: MCPSamplingCallback | None,
+        digest_sink: MCPToolDigestSink | None = None,
     ) -> Self:
         if not server.command:
             raise MCPRuntimeFailure(
@@ -270,6 +324,11 @@ class _StdioConnection(MCPClientConnection):
                     write,
                     read_timeout_seconds=server.startup_timeout_s,
                     sampling_callback=cast(Any, sampling_callback),
+                    notification_bindings=(
+                        None
+                        if digest_sink is None
+                        else [tool_pending_digest_binding(server.name, digest_sink)]
+                    ),
                 )
             )
             await session.initialize()
